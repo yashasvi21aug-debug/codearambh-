@@ -23,8 +23,10 @@ app.add_middleware(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 CBT_SYSTEM_PROMPT = (
-    "You are MindEase, a warm, supportive CBT companion for students. "
-    "Respond casually to greetings. For other thoughts, listen with empathy and offer grounding advice."
+    "You are MindEase, a warm, non-judgmental CBT (Cognitive Behavioral Therapy) companion for college students. "
+    "Respond casually and warmly to greetings like 'hi' or 'hello' by welcoming them and asking how their day is going. "
+    "Validate emotions, help gently identify negative thinking patterns, and offer practical grounding tips. "
+    "Never diagnose or prescribe medication. Keep answers conversational, empathetic, and concise."
 )
 
 class ChatRequest(BaseModel):
@@ -38,28 +40,59 @@ async def chat_endpoint(payload: ChatRequest):
 
     async def event_generator():
         if not GEMINI_API_KEY:
-            yield f"data: {json.dumps({'token': 'Error: GEMINI_API_KEY environment variable is empty on Render.', 'is_crisis': False})}\n\n"
+            yield f"data: {json.dumps({'token': 'Error: GEMINI_API_KEY is not configured on Render.', 'is_crisis': False})}\n\n"
             return
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        
-        body = {
-            "system_instruction": {"parts": [{"text": CBT_SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": payload.message}]}]
-        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # 1. Fetch available models for your specific key
+            target_model = None
+            try:
+                list_res = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}")
+                if list_res.status_code == 200:
+                    models_list = list_res.json().get("models", [])
+                    available = [
+                        m["name"] for m in models_list 
+                        if "generateContent" in m.get("supportedGenerationMethods", [])
+                    ]
+                    # Select the newest available flash model, or fallback to the first supported model
+                    for name in available:
+                        if "flash" in name:
+                            target_model = name
+                            break
+                    if not target_model and available:
+                        target_model = available[0]
+            except Exception:
+                pass
 
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            if not target_model:
+                target_model = "models/gemini-2.5-flash"
+
+            # 2. Call the active model
+            clean_model_name = target_model.replace("models/", "")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent?key={GEMINI_API_KEY}"
+            
+            body = {
+                "system_instruction": {
+                    "parts": [{"text": CBT_SYSTEM_PROMPT}]
+                },
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": payload.message}]
+                    }
+                ]
+            }
+
+            try:
                 res = await client.post(url, json=body)
                 if res.status_code == 200:
                     data = res.json()
                     bot_text = data["candidates"][0]["content"]["parts"][0]["text"]
                     yield f"data: {json.dumps({'token': bot_text, 'is_crisis': False})}\n\n"
                 else:
-                    # Print raw error message from Google directly to the chat
-                    yield f"data: {json.dumps({'token': f'Google API Error ({res.status_code}): {res.text[:120]}', 'is_crisis': False})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'token': f'Backend Error: {str(e)}', 'is_crisis': False})}\n\n"
+                    yield f"data: {json.dumps({'token': f'API Error ({res.status_code}): {res.text[:120]}', 'is_crisis': False})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'token': f'Connection error: {str(e)}', 'is_crisis': False})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
