@@ -52,16 +52,15 @@ export default function Home() {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Instant Quick Exit handler
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
   const triggerQuickExit = useCallback(() => {
     setIsMasked(true);
     setMessages([]);
     setInput("");
-    // Replace URL history so back button cannot restore the chat
     window.location.replace("https://www.google.com");
   }, []);
 
-  // Global keydown listener for Esc or Alt+Q
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" || (e.altKey && e.key.toLowerCase() === "q")) {
@@ -95,7 +94,7 @@ export default function Home() {
     const promptMessage = `I just logged my mood as ${selectedMood.label} (${selectedMood.emoji}) due to ${entry.trigger}.`;
     setMessages((prev) => [...prev, { sender: "user", text: promptMessage }]);
 
-    fetch("http://localhost:8000/api/chat", {
+    fetch(`${API_URL}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: promptMessage })
@@ -145,7 +144,7 @@ export default function Home() {
     setLoading(true);
 
     try {
-      const res = await fetch("http://localhost:8000/api/chat", {
+      const res = await fetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userText })
@@ -197,7 +196,6 @@ export default function Home() {
     }
   };
 
-  // Instant Blank Screen Mask to prevent visual leakage before navigation fires
   if (isMasked) {
     return (
       <main className="h-screen w-screen bg-white flex flex-col items-center justify-center font-sans text-slate-700">
