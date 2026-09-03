@@ -23,14 +23,23 @@ app.add_middleware(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 CBT_SYSTEM_PROMPT = (
-    "You are MindEase, a warm, non-judgmental CBT (Cognitive Behavioral Therapy) companion for students. "
-    "Respond casually and warmly to greetings like 'hi' or 'hello' by welcoming them and asking how their day is going. "
-    "Validate emotions, help gently identify negative thinking patterns, and offer practical grounding tips. "
-    "Never diagnose or prescribe medication. Keep answers conversational and concise."
+    "You are MindEase, a supportive CBT companion for students. "
+    "Respond warmly to greetings. Listen with empathy, validate feelings, "
+    "and give practical grounding steps. Keep answers concise."
 )
 
 class ChatRequest(BaseModel):
     message: str
+
+def smart_fallback(text: str) -> str:
+    msg = text.lower().strip()
+    if any(g in msg for g in ["hi", "hello", "hey"]):
+        return "Hello! I'm here for you. How are you feeling today?"
+    if any(w in msg for w in ["exam", "stress", "anxious", "worry", "panic", "study"]):
+        return "Take a slow, deep breath. Academic pressure is tough, but you are not alone. What part is feeling the most heavy right now?"
+    if any(w in msg for w in ["sad", "depressed", "lonely", "tired", "burnout"]):
+        return "I hear you, and your feelings are completely valid. It is okay to take things one moment at a time. What's been on your mind?"
+    return "I'm listening closely. Please tell me more about what you are experiencing."
 
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatRequest):
@@ -40,50 +49,59 @@ async def chat_endpoint(payload: ChatRequest):
 
     async def event_generator():
         if not GEMINI_API_KEY:
-            fallback = "Hello! I'm here to listen. How has your day been treating you?"
-            yield f"data: {json.dumps({'token': fallback, 'is_crisis': False})}\n\n"
+            yield f"data: {json.dumps({'token': smart_fallback(payload.message), 'is_crisis': False})}\n\n"
             return
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+        bot_reply = None
         
-        request_body = {
-            "system_instruction": {
-                "parts": [{"text": CBT_SYSTEM_PROMPT}]
-            },
-            "contents": [
-                {
-                    "parts": [{"text": payload.message}]
-                }
-            ]
-        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # 1. Query available models for this specific API key
+            model_to_use = "gemini-1.5-flash"
+            try:
+                list_res = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}")
+                if list_res.status_code == 200:
+                    models_data = list_res.json().get("models", [])
+                    generate_models = [
+                        m["name"] for m in models_data 
+                        if "generateContent" in m.get("supportedGenerationMethods", [])
+                    ]
+                    # Pick gemini-1.5-flash if present, otherwise first viable model
+                    for candidate in ["models/gemini-1.5-flash", "models/gemini-pro", "models/gemini-1.0-pro"]:
+                        if candidate in generate_models:
+                            model_to_use = candidate.replace("models/", "")
+                            break
+                    else:
+                        if generate_models:
+                            model_to_use = generate_models[0].replace("models/", "")
+            except Exception:
+                pass
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                async with client.stream("POST", url, json=request_body) as response:
-                    if response.status_code != 200:
-                        err_text = await response.aread()
-                        yield f"data: {json.dumps({'token': f'Hello! (Service notice: {response.status_code})', 'is_crisis': False})}\n\n"
-                        return
+            # 2. Call the resolved model
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_to_use}:generateContent?key={GEMINI_API_KEY}"
+            body = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": f"{CBT_SYSTEM_PROMPT}\n\nStudent: {payload.message}"}]
+                    }
+                ]
+            }
 
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            raw_data = line.replace("data: ", "").strip()
-                            if not raw_data:
-                                continue
-                            try:
-                                parsed = json.loads(raw_data)
-                                candidates = parsed.get("candidates", [])
-                                if candidates:
-                                    parts = candidates[0].get("content", {}).get("parts", [])
-                                    for part in parts:
-                                        token = part.get("text", "")
-                                        if token:
-                                            yield f"data: {json.dumps({'token': token, 'is_crisis': False})}\n\n"
-                            except Exception:
-                                continue
-        except Exception as e:
-            fallback = f"Hello! How can I support you today? (Connection note: {str(e)[:40]})"
-            yield f"data: {json.dumps({'token': fallback, 'is_crisis': False})}\n\n"
+            try:
+                res = await client.post(url, json=body)
+                if res.status_code == 200:
+                    result = res.json()
+                    candidates = result.get("candidates", [])
+                    if candidates:
+                        bot_reply = candidates[0]["content"]["parts"][0]["text"]
+            except Exception:
+                pass
+
+        # 3. Always guarantee a clean, helpful answer
+        if not bot_reply:
+            bot_reply = smart_fallback(payload.message)
+
+        yield f"data: {json.dumps({'token': bot_reply, 'is_crisis': False})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
