@@ -47,7 +47,7 @@ async def chat_endpoint(payload: ChatRequest):
 
         try:
             response = client.models.generate_content_stream(
-                model="gemini-2.5-flash",
+                model="gemini-1.5-flash",
                 contents=payload.message,
                 config={"system_instruction": CBT_SYSTEM_PROMPT}
             )
@@ -55,7 +55,7 @@ async def chat_endpoint(payload: ChatRequest):
                 token = chunk.text or ""
                 yield f"data: {json.dumps({'token': token, 'is_crisis': False})}\n\n"
         except Exception as e:
-            err_msg = f"Hello! How are you doing today? (System notice: {str(e)[:40]})"
+            err_msg = f"Hello! How can I support you today? (Note: {str(e)[:40]})"
             yield f"data: {json.dumps({'token': err_msg, 'is_crisis': False})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
